@@ -1,7 +1,7 @@
 {
   "data": "2026-10-10",
   "pagina": 1,
-  "ultimaExecucao": "2026-10-17T15:07:59.205640+00:00",
+  "ultimaExecucao": "2026-10-17T15:19:54.325489+00:00",
   "motivo": "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao: 400 Client Error:  for url: https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao?dataInicial=20261010&dataFinal=20261010&cnpj=13650403000128&pagina=1&tamanhoPagina=10",
   "requisicoes": 4,
   "novosItens": 0
