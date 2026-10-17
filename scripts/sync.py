@@ -48,6 +48,8 @@ def main():
  spec=spec_from_file_location('original',ROOT/'legado'/'automacao_pncp.py');mod=module_from_spec(spec);spec.loader.exec_module(mod)
  collector=Collector();old=load(RAW,{'data':[]});rows=old.get('data',[]) if isinstance(old,dict) else old
  existing={(r.get('linkPNCP'),str(r.get('itemNo'))) for r in rows}
+ # Índice em memória para evitar varreduras repetidas na base histórica
+ known_links={r.get('linkPNCP') for r in rows}
  cursor=load(CURSOR,{})
  today=date.today();start=date.fromisoformat(cursor.get('data',str(today-timedelta(days=CFG.get('janela_dias',7)))))
  if start>today:start=today-timedelta(days=CFG.get('janela_dias',7))
@@ -65,10 +67,10 @@ def main():
     ano=rec.get('anoCompra');seq=rec.get('sequencialCompra')
     if not ano or not seq:continue
     link=f'https://pncp.gov.br/app/editais/{CNPJ}/{ano}/{seq}'
-    if any(r.get('linkPNCP')==link for r in rows):continue
+    if link in known_links:continue
     items=collector.items(ano,seq)
     if len(items)>=100:
-     raise Pause(f'Processo {ano}/{seq} possui >=100 itens: requer paginação completa; não publicado parcialmente')
+     raise Pause(f'Processo {ano}/{seq} com 100 ou mais itens exige paginação adicional; página mantida para revisão')
     formatted=[]
     for item in items:
      if item.get('numeroItem') is not None:item['resultados_vencedores']=collector.results(ano,seq,item['numeroItem'])
