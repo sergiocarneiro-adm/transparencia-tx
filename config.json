@@ -1,0 +1,8 @@
+{
+  "municipio": "Teixeira de Freitas - BA",
+  "cnpj": "13650403000128",
+  "janela_dias": 7,
+  "max_requisicoes_por_execucao": 90,
+  "intervalo_segundos": 2.5,
+  "max_anexos_por_execucao": 30
+}
