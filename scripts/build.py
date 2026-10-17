@@ -3,6 +3,7 @@ from pathlib import Path
 from datetime import datetime,timezone
 ROOT=Path(__file__).resolve().parents[1]
 DATA=ROOT/'data'
+DATA.mkdir(parents=True,exist_ok=True)
 def load(p,default):
     try:return json.loads(p.read_text(encoding='utf-8'))
     except (FileNotFoundError,json.JSONDecodeError):return default
@@ -24,7 +25,7 @@ def main():
         # Não somar estimativas como valor global: itens podem conter resultados parciais.
         entry={'id':k,'ano':int(ano),'sequencial':int(seq),'numero':first.get('compra'),'processo':first.get('processo'),'modalidade':first.get('modalidade'),'objeto':first.get('objeto'),'orgao':first.get('orgao'),'dataPublicacao':first.get('dataPublicacao'),'linkPNCP':first.get('linkPNCP'),'totalItens':len(items),'itensComResultado':sum(1 for i in items if i.get('vencedor') and i.get('vencedor')!='SEM RESULTADO')}
         index.append(entry)
-        (DATA/'processos'/f'{k}.json').write_text(json.dumps({'contratacao':entry,'itens':items},ensure_ascii=False,separators=(',',':')),encoding='utf-8')
+        (DATA/f'{k}.json').write_text(json.dumps({'contratacao':entry,'itens':items},ensure_ascii=False,separators=(',',':')),encoding='utf-8')
     index.sort(key=lambda x:(x['ano'],x['sequencial']),reverse=True)
     (DATA/'contratacoes.json').write_text(json.dumps(index,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
     status=load(DATA/'status.json',{})
