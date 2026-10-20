@@ -8,6 +8,7 @@ CFG=json.loads((ROOT/'config.json').read_text())
 DATA=ROOT/'data';DATA.mkdir(exist_ok=True)
 CURSOR=DATA/'cursor.json';RAW=ROOT/'dados.json'
 CNPJ=CFG['cnpj']; BASE='https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao'; API='https://pncp.gov.br/api/pncp/v1'
+MODALIDADES=[int(x) for x in CFG.get('modalidades_pncp',list(range(1,14)))]
 MAX=int(CFG.get('max_requisicoes_por_execucao',90)); PAUSE=float(CFG.get('intervalo_segundos',2.5))
 class Pause(Exception):pass
 class Collector:
@@ -24,7 +25,8 @@ class Collector:
      try:wait=max(wait,min(120,int(r.headers.get('Retry-After','0'))))
      except ValueError:pass
      print(f'HTTP {r.status_code}; aguardando {wait}s');time.sleep(wait);continue
-    if r.status_code in (204,404):return []
+    if r.status_code==204:return []
+    if r.status_code==404:raise RuntimeError(f'HTTP 404 na API: {r.url}')
     r.raise_for_status()
     if not r.content.strip():return []
     return r.json()
@@ -33,10 +35,21 @@ class Collector:
     time.sleep(min(60,5*2**attempt))
   raise Pause('API indisponível ou limitando requisições; retomada posterior')
  def items(self,ano,seq):
-  data=self.get(f'{API}/orgaos/{CNPJ}/compras/{ano}/{seq}/itens',{'pagina':1,'tamanhoPagina':100})
-  if isinstance(data,list):return data
-  if isinstance(data,dict):return data.get('data') or data.get('resultado') or []
-  return []
+  output=[];pagina=1
+  while True:
+   data=self.get(f'{API}/orgaos/{CNPJ}/compras/{ano}/{seq}/itens',{'pagina':pagina,'tamanhoPagina':100})
+   chunk=data if isinstance(data,list) else (data.get('data') or data.get('resultado') or []) if isinstance(data,dict) else []
+   if not isinstance(chunk,list):raise RuntimeError('Resposta de itens inválida')
+   output.extend(chunk)
+   if isinstance(data,dict):
+    total=data.get('totalPaginas')
+    if total is not None:
+     if pagina>=int(total):break
+    elif len(chunk)<100:break
+   elif len(chunk)<100:break
+   if not chunk:break
+   pagina+=1
+  return output
  def results(self,ano,seq,n):
   data=self.get(f'{API}/orgaos/{CNPJ}/compras/{ano}/{seq}/itens/{n}/resultados')
   return data if isinstance(data,list) else ([data] if isinstance(data,dict) else [])
@@ -48,40 +61,54 @@ def main():
  spec=spec_from_file_location('original',ROOT/'legado'/'automacao_pncp.py');mod=module_from_spec(spec);spec.loader.exec_module(mod)
  collector=Collector();old=load(RAW,{'data':[]});rows=old.get('data',[]) if isinstance(old,dict) else old
  existing={(r.get('linkPNCP'),str(r.get('itemNo'))) for r in rows}
- # Índice em memória para evitar varreduras repetidas na base histórica
- known_links={r.get('linkPNCP') for r in rows}
  cursor=load(CURSOR,{})
- today=date.today();start=date.fromisoformat(cursor.get('data',str(today-timedelta(days=CFG.get('janela_dias',7)))))
- if start>today:start=today-timedelta(days=CFG.get('janela_dias',7))
- day=start; page=int(cursor.get('pagina',1));seen=0;added=0;reason='completo';pending=[]
+ today=date.today();window=int(CFG.get('janela_dias',7))
+ # Reconsulta a janela recente em cada ciclo concluído, para capturar publicações tardias.
+ default_start=today-timedelta(days=window)
+ start=date.fromisoformat(cursor.get('data',str(default_start)))
+ if start>today:start=default_start
+ day=start; modality=int(cursor.get('modalidade',MODALIDADES[0]));page=int(cursor.get('pagina',1))
+ if modality not in MODALIDADES:modality=MODALIDADES[0];page=1
+ seen=0;added=0;reason='completo';pending=[];fatal=None
+ importer=mod.PNCPImporter(cnpj=CNPJ)
  try:
   while day<=today:
-   # consulta por CNPJ utilizada pelo projeto legado funcional
-   params={'dataInicial':day.strftime('%Y%m%d'),'dataFinal':day.strftime('%Y%m%d'),'cnpj':CNPJ,'pagina':page,'tamanhoPagina':10}
+   params={'dataInicial':day.strftime('%Y%m%d'),'dataFinal':day.strftime('%Y%m%d'),
+           'codigoModalidadeContratacao':modality,'cnpj':CNPJ,'pagina':page,'tamanhoPagina':10}
    result=collector.get(BASE,params)
-   records=result.get('data',[]) if isinstance(result,dict) else []
-   if not records:
-    day+=timedelta(days=1);page=1;continue
+   if isinstance(result,list):records=result;total=1
+   elif isinstance(result,dict):
+    records=result.get('data') or []
+    total=int(result.get('totalPaginas') or 1)
+   else:raise RuntimeError(f'Resposta inválida para {day}, modalidade {modality}')
+   if not isinstance(records,list):raise RuntimeError('Lista de contratações inválida')
+   # Uma página só avança quando todos os seus processos foram concluídos.
+   page_pending=[]
    for rec in records:
     if str((rec.get('orgaoEntidade') or {}).get('cnpj'))!=CNPJ:continue
     ano=rec.get('anoCompra');seq=rec.get('sequencialCompra')
     if not ano or not seq:continue
     link=f'https://pncp.gov.br/app/editais/{CNPJ}/{ano}/{seq}'
-    if link in known_links:continue
+    if any(r.get('linkPNCP')==link for r in rows) or any(r.get('linkPNCP')==link for r in pending):continue
     items=collector.items(ano,seq)
-    if len(items)>=100:
-     raise Pause(f'Processo {ano}/{seq} com 100 ou mais itens exige paginação adicional; página mantida para revisão')
+    if not items:raise RuntimeError(f'Processo {ano}/{seq} sem itens: tentar novamente')
     formatted=[]
     for item in items:
      if item.get('numeroItem') is not None:item['resultados_vencedores']=collector.results(ano,seq,item['numeroItem'])
-     flat=mod.PNCPImporter(cnpj=CNPJ).formatar_para_html(rec,item)
-     if flat:formatted.append(flat)
-    pending.extend(formatted);seen+=1
-   total=int(result.get('totalPaginas',1)) if isinstance(result,dict) else 1
-   if page>=total:day+=timedelta(days=1);page=1
-   else:page+=1
- except (Pause,RuntimeError,requests.RequestException,ValueError) as e:
-  reason=str(e);print('Pausa controlada:',reason)
+     flat=importer.formatar_para_html(rec,item)
+     if flat is None:raise RuntimeError(f'Falha ao formatar item do processo {ano}/{seq}')
+     formatted.append(flat)
+    page_pending.extend(formatted);seen+=1
+   pending.extend(page_pending)
+   if page<total:page+=1
+   else:
+    idx=MODALIDADES.index(modality)
+    if idx+1<len(MODALIDADES):modality=MODALIDADES[idx+1];page=1
+    else:day+=timedelta(days=1);modality=MODALIDADES[0];page=1
+ except Pause as e:
+  reason=f'limite: {e}';print('Pausa controlada:',reason)
+ except (RuntimeError,requests.RequestException,ValueError,KeyError) as e:
+  fatal=e;reason=f'ERRO: {e}';print(reason,file=sys.stderr)
  finally:
   for item in pending:
    k=(item.get('linkPNCP'),str(item.get('itemNo')))
@@ -89,7 +116,11 @@ def main():
   if isinstance(old,dict):old['data']=rows;old['totalRegistros']=len(rows);old['geradoEm']=datetime.now(timezone.utc).isoformat()
   else:old=rows
   RAW.write_text(json.dumps(old,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
-  # cursor apenas avança após concluir página; em caso de interrupção durante página, ela será repetida com deduplicação
-  CURSOR.write_text(json.dumps({'data':day.isoformat(),'pagina':page,'ultimaExecucao':datetime.now(timezone.utc).isoformat(),'motivo':reason,'requisicoes':collector.calls,'novosItens':added},ensure_ascii=False,indent=2),encoding='utf-8')
+  if day>today and fatal is None:
+   day=today-timedelta(days=window);modality=MODALIDADES[0];page=1
+  CURSOR.write_text(json.dumps({'data':day.isoformat(),'modalidade':modality,'pagina':page,
+   'ultimaExecucao':datetime.now(timezone.utc).isoformat(),'motivo':reason,
+   'requisicoes':collector.calls,'novosItens':added},ensure_ascii=False,indent=2),encoding='utf-8')
   print(f'Requisições: {collector.calls}; novos processos: {seen}; novos itens: {added}; status: {reason}')
+ if fatal is not None:sys.exit(1)
 if __name__=='__main__':main()
